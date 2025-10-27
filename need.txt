@@ -1,0 +1,333 @@
+PROCEDURE SendToJournalInventary@1102401035(InventoryScan@1102401002 : Record 50066;ItemNo@1102401008 : Code[30];PostingDate@1102401005 : Date;NextDocNo@1102401004 : Code[30];InventoryCode@1102401007 : Code[30]);
+    VAR
+      InventaryScan@1102401001 : Record 50066;
+      ItemJournalLine@1102401003 : Record 83;
+      ItmJurnlLin@1102401006 : Record 83;
+      TmpLedgerEntryTrackingLotNo@1102401021 : Record 50065;
+      AjustPos@1102401024 : Boolean;
+      AjustPos1@1102401023 : Boolean;
+      AjustNeg@1102401022 : Boolean;
+      QtyNAVAjsPos@1102401020 : Decimal;
+      QtyNAVAjsPos1@1102401017 : Decimal;
+      QtyNAVAjsNeg@1102401016 : Decimal;
+      QtyAjstPos@1102401015 : Decimal;
+      QtyAjstPos1@1102401014 : Decimal;
+      QtyAjstNeg@1102401012 : Decimal;
+      "******************"@1102401025 : Text[1];
+    BEGIN
+      ManufacturingSetup.GET('');
+
+      InventaryScan.RESET;
+      //InventaryScan.COPYFILTERS(InventoryScan);
+      InventaryScan.SETRANGE("Item No"          ,ItemNo);
+      InventaryScan.SETRANGE("Inventory Code"  ,InventoryCode);
+      InventaryScan.SETFILTER("Reg. Sended"    ,'=%1',FALSE);
+      InventaryScan.SETFILTER("Cod. Location"  ,'<>%1','100');
+      IF InventaryScan.FINDSET THEN BEGIN
+        Windows.OPEN(TextProcess+'#######1#');
+        REPEAT
+          InventaryScan.TESTFIELD("Cod. Location");
+          InventaryScan.TESTFIELD("Bin Code");
+          AjustPos    :=FALSE;
+          AjustNeg    :=FALSE;
+          AjustPos1   :=FALSE;
+          QtyAjstPos  :=0;
+          QtyAjstNeg  :=0;
+          QtyNAVAjsPos:=0;
+          QtyNAVAjsNeg:=0;
+          QtyAjstPos1 :=0;
+          QtyNAVAjsPos1 :=0;
+
+          Windows.UPDATE(1,InventaryScan."Item No");
+
+          TmpLedgerEntryTrackingLotNo.RESET;
+          TmpLedgerEntryTrackingLotNo.SETRANGE("Entry No. Pre-Inventory",InventaryScan."Entry No");
+          IF TmpLedgerEntryTrackingLotNo.FINDSET THEN BEGIN
+            REPEAT
+              IF (TmpLedgerEntryTrackingLotNo."Calculated Quantity" > TmpLedgerEntryTrackingLotNo."Qty Physical") THEN BEGIN
+                QtyAjstNeg    += TmpLedgerEntryTrackingLotNo."Qty Physical";
+                QtyNAVAjsNeg  += TmpLedgerEntryTrackingLotNo."Calculated Quantity";
+                AjustNeg      := TRUE;
+              END;
+              IF (TmpLedgerEntryTrackingLotNo."Calculated Quantity" < TmpLedgerEntryTrackingLotNo."Qty Physical") THEN BEGIN
+                QtyAjstPos    += TmpLedgerEntryTrackingLotNo."Qty Physical";
+                QtyNAVAjsPos  += TmpLedgerEntryTrackingLotNo."Calculated Quantity";
+                AjustPos      := TRUE;
+              END;
+              IF (TmpLedgerEntryTrackingLotNo."Calculated Quantity" = TmpLedgerEntryTrackingLotNo."Qty Physical") THEN BEGIN
+                QtyAjstPos1    += TmpLedgerEntryTrackingLotNo."Qty Physical";
+                QtyNAVAjsPos1  += TmpLedgerEntryTrackingLotNo."Calculated Quantity";
+                AjustPos1      := TRUE;
+              END;
+            UNTIL TmpLedgerEntryTrackingLotNo.NEXT=0;
+          END;
+
+          //>>Cantidades Iguales
+          IF (AjustPos1 = TRUE) THEN BEGIN
+            DiarioInventarios(PostingDate,NextDocNo,InventaryScan."Item No",InventaryScan."Cod. Location",InventaryScan."Bin Code",QtyNAVAjsPos1,QtyAjstPos1,ItemJournalLine);
+          END;
+
+          //>>Ajuste Positivo
+          IF (AjustPos = TRUE) THEN BEGIN
+            DiarioInventarios(PostingDate,NextDocNo,InventaryScan."Item No",InventaryScan."Cod. Location",InventaryScan."Bin Code",QtyNAVAjsPos,QtyAjstPos,ItemJournalLine);
+            InsertLotPosJrnalInv(InventaryScan,ItemJournalLine);
+          END;
+
+          //>>Ajuste Negativo
+          IF (AjustNeg=TRUE) THEN BEGIN
+            DiarioInventarios(PostingDate,NextDocNo,InventaryScan."Item No",InventaryScan."Cod. Location",InventaryScan."Bin Code",QtyNAVAjsNeg,QtyAjstNeg,ItemJournalLine);
+            InsertLotNegJrnalInv(InventaryScan,ItemJournalLine);
+          END;
+
+          InventaryScan."Reg. Sended":=TRUE;
+          InventaryScan.MODIFY;
+
+          //>>Actualiza pre-status etiquetas
+          UpdateStatusLabelInventory(InventaryScan);
+
+          //Elimina Registro
+         IF ManufacturingSetup."Delete Reg InventaryPhys" THEN
+         DeleteRegPreInventary(InventaryScan);
+
+        UNTIL InventaryScan.NEXT=0;
+          //Elimina Registros
+         IF ManufacturingSetup."Delete Reg InventaryPhys" THEN
+          DeleteRegNoSendtoJornal();
+
+         Windows.CLOSE;
+        //MESSAGE('Envio Completado!!');
+      END
+      {
+      ELSE
+        MESSAGE('No hay Registros Pendientes por Enviar!!');
+        }
+    END;
+
+    PROCEDURE DiarioInventarios@1102401040(PostingDate@1102401027 : Date;NextDocNo@1102401018 : Code[30];NoPrd@1102401003 : Code[30];CodAlm@1102401021 : Code[30];CodUbic@1102401020 : Code[30];PhysInvQuantity@1102401006 : Decimal;Qty1@1102401002 : Decimal;VAR TrnItemJournalLine@1102401001 : Record 83) : Boolean;
+    VAR
+      CodO@1102401004 : Record 82;
+      TmpItmJrnL@1102401005 : Record 83;
+      Libro@1102401009 : Code[50];
+      Seccion@1102401008 : Code[50];
+      Qty@1102401007 : Decimal;
+      ItmJrnline1@1102401019 : Record 83;
+      ItmJrnline2@1102401011 : Record 83;
+      ItmJrnline3@1102401017 : Record 83;
+      Line@1102401010 : Integer;
+      ItmJournalLine@1102401012 : Record 83;
+      TmpReservationEntry@1102401013 : Record 337;
+      ReservEntry2@1102401014 : Record 337;
+      ReservEntry@1102401015 : Record 337;
+      MovNo@1102401016 : Integer;
+      BinContent@1102401022 : Record 7302;
+      SourceCodeSetup@1102401023 : Record 242;
+      ItemJnlTemplate@1102401024 : Record 82;
+      ItemJnlBatch@1102401025 : Record 233;
+      ItemLedgEntry@1102401026 : Record 32;
+      Qty2@1102401028 : Decimal;
+    BEGIN
+      SourceCodeSetup.GET('');
+      ManufacturingSetup.GET('');
+      ManufacturingSetup.TESTFIELD("Journal Template Name Stock");
+      ManufacturingSetup.TESTFIELD("Journal Batch Name Stock");
+      Libro     :=  ManufacturingSetup."Journal Template Name Stock";
+      Seccion   :=  ManufacturingSetup."Journal Batch Name Stock";
+
+      Qty:=Qty1;
+
+      ItemJnlTemplate.GET(Libro);
+      ItemJnlBatch.GET(Libro,Seccion);
+      //ConsultLotNo(EntryLabel,NoPrd,NoLot,qty,);
+
+      ItmJrnline2.RESET;
+      ItmJrnline2.SETRANGE("Journal Template Name",Libro);
+      ItmJrnline2.SETRANGE("Journal Batch Name"   ,Seccion);
+      IF ItmJrnline2.FINDLAST THEN
+        Line := ItmJrnline2."Line No." +10000
+      ELSE
+        Line := 10000;
+
+      ItmJournalLine.INIT;
+      ItmJournalLine.VALIDATE("Journal Template Name" ,  Libro);
+      ItmJournalLine.VALIDATE("Journal Batch Name"    ,  Seccion);
+      ItmJournalLine."Line No."                       := Line;
+      ItmJournalLine.VALIDATE("Posting Date"          ,  PostingDate);
+      IF PhysInvQuantity >= Qty THEN
+        ItmJournalLine.VALIDATE("Entry Type"          ,  ItmJournalLine."Entry Type"::"Positive Adjmt.")
+      ELSE
+        ItmJournalLine.VALIDATE("Entry Type"          ,  ItmJournalLine."Entry Type"::"Negative Adjmt.");
+      ItmJournalLine.VALIDATE("Document No."          ,  NextDocNo);
+      ItmJournalLine.VALIDATE("Item No."              ,  NoPrd);
+      ItmJournalLine.VALIDATE("Location Code"         ,  CodAlm);
+      ItmJournalLine.VALIDATE("Bin Code"              ,  CodUbic);
+      ItmJournalLine.VALIDATE("Source Code"           ,  SourceCodeSetup."Phys. Inventory Journal");
+      ItmJournalLine."Qty. (Phys. Inventory)"         :=  Qty;
+      ItmJournalLine."Phys. Inventory"                := TRUE;
+      ItmJournalLine.VALIDATE("Qty. (Calculated)"     ,PhysInvQuantity);
+      ItmJournalLine."Posting No. Series"             := ItemJnlBatch."Posting No. Series";
+      ItmJournalLine."Reason Code"                    := ItemJnlBatch."Reason Code";
+      ItemLedgEntry.RESET;
+      ItemLedgEntry.SETCURRENTKEY("Item No.");
+      ItemLedgEntry.SETRANGE("Item No.",NoPrd);
+      IF ItemLedgEntry.FINDLAST THEN
+        ItmJournalLine."Last Item Ledger Entry No." := ItemLedgEntry."Entry No."
+      ELSE
+        ItmJournalLine."Last Item Ledger Entry No." := 0;
+      IF ItmJournalLine.INSERT(TRUE) THEN BEGIN
+        TrnItemJournalLine := ItmJournalLine;
+        EXIT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateStatusLabelInventory@1102401132(PreScannedInventory@1102401002 : Record 50066);
+    VAR
+      LabelLedgerEntry@1102401001 : Record 50011;
+      LotRelationed@1102401005 : Record 50065;
+      PreStatus@1102401003 : Integer;
+      LabelLedgerEntry2@1102401004 : Record 50011;
+    BEGIN
+      ManufacturingSetup.GET('');
+      ManufacturingSetup.TESTFIELD("Journal Template Name Stock");
+      ManufacturingSetup.TESTFIELD("Journal Batch Name Stock");
+      LibroInvFis     :=  ManufacturingSetup."Journal Template Name Stock";
+      SeccionInvFis   :=  ManufacturingSetup."Journal Batch Name Stock";
+
+      //limpia todos los asignados previos
+      LabelLedgerEntry2.RESET;
+      LabelLedgerEntry2.SETRANGE("Journal Batch Name",SeccionInvFis);
+      LabelLedgerEntry2.SETRANGE("Journal Template Name",LibroInvFis);
+      IF LabelLedgerEntry2.FINDSET THEN BEGIN
+        REPEAT
+        LabelLedgerEntry2."Journal Batch Name"    :='';
+        LabelLedgerEntry2."Journal Template Name" :='';
+        UNTIL LabelLedgerEntry2.NEXT=0;
+      END;
+
+      LotRelationed.RESET;
+      LotRelationed.SETRANGE("Inventory Code" ,PreScannedInventory."Inventory Code");
+      LotRelationed.SETRANGE("Item No."       ,PreScannedInventory."Item No");
+      LotRelationed.SETRANGE("Location Code"  ,PreScannedInventory."Cod. Location");
+      LotRelationed.SETRANGE("Bin Code"       ,PreScannedInventory."Bin Code");
+      IF LotRelationed.FINDSET THEN BEGIN
+        REPEAT
+          IF LotRelationed."Calculated Quantity" <= LotRelationed."Qty Physical" THEN
+            PreStatus :=1 // ajust pos
+          ELSE
+            PreStatus :=0;      //ajust neg
+
+          LabelLedgerEntry.RESET;
+          LabelLedgerEntry.SETCURRENTKEY("Source No.","Lot. No");
+          LabelLedgerEntry.SETRANGE("Source No.",LotRelationed."Item No.");
+          LabelLedgerEntry.SETRANGE("Lot. No"   ,LotRelationed."Lot. No.");
+          IF LabelLedgerEntry.FINDSET THEN BEGIN
+            REPEAT
+              IF (PreStatus = 1) THEN BEGIN  //ajuste positivo
+                LabelLedgerEntry."Pre-Label Status" := LabelLedgerEntry."Pre-Label Status"::Almacen;
+                LabelLedgerEntry."Pre Remaining Quantity"  := LabelLedgerEntry."Pre Remaining Quantity";
+              END;
+
+              IF (PreStatus = 0) THEN BEGIN //ajuste negativo
+                LabelLedgerEntry."Pre-Label Status" := LabelLedgerEntry."Pre-Label Status"::Terminada;
+                LabelLedgerEntry."Pre Remaining Quantity" := 0;
+              END;
+              LabelLedgerEntry."Journal Template Name" :=LibroInvFis;
+              LabelLedgerEntry."Journal Batch Name" :=SeccionInvFis;
+              LabelLedgerEntry.MODIFY;
+            UNTIL LabelLedgerEntry.NEXT=0;
+          END;
+        UNTIL LotRelationed.NEXT=0;
+      END;
+    END;
+
+    LOCAL PROCEDURE DeleteRegPreInventary@1102401064(InventaryScan@1102401001 : Record 50066);
+    VAR
+      InventaryScan2@1102401002 : Record 50066;
+      EntryTrackingLotNo@1102401003 : Record 50065;
+      PreInventaryHH@1102401004 : Record 50061;
+    BEGIN
+      //elimina preinventario
+      InventaryScan2.RESET;
+      InventaryScan2.GET(InventaryScan."Entry No");
+      InventaryScan2.DELETE;
+
+      //elimina etiqueta leida
+      PreInventaryHH.RESET;
+      PreInventaryHH.SETRANGE("Entry No. Pre-Inventary", InventaryScan."Entry No");
+      IF PreInventaryHH.FINDSET THEN BEGIN
+        REPEAT
+          PreInventaryHH.DELETE;
+        UNTIL PreInventaryHH.NEXT=0;
+      END;
+
+      //elimina lotes encontrados
+      EntryTrackingLotNo.RESET;
+      EntryTrackingLotNo.SETRANGE("Entry No. Pre-Inventory",InventaryScan."Entry No");
+      IF EntryTrackingLotNo.FINDSET THEN BEGIN
+        REPEAT
+          EntryTrackingLotNo.DELETE;
+        UNTIL EntryTrackingLotNo.NEXT=0;
+      END;
+    END;
+
+ LOCAL PROCEDURE DeleteRegNoSendtoJornal@1102401069();
+    VAR
+      InventaryScan3@1102401002 : Record 50066;
+      LedgerEntryTrackingLotNo5@1102401003 : Record 50065;
+    BEGIN
+      //elimina almacen calculados
+      InventaryScan3.RESET;
+      IF InventaryScan3.FINDSET THEN
+        InventaryScan3.DELETEALL;
+
+      LedgerEntryTrackingLotNo5.RESET;
+      IF LedgerEntryTrackingLotNo5.FINDSET THEN
+        LedgerEntryTrackingLotNo5.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE InsertLotPosJrnalInv@1102401066(InventaryScan@1102401001 : Record 50066;ItemJournalLine@1102401003 : Record 83);
+    VAR
+      LedgerEntryTrackingLotNo@1102401002 : Record 50065;
+      LedgerEntryTrackingLotNo2@1102401013 : Record 50065;
+      LedgerEntryTrackingLotNo6@1102401010 : Record 50065;
+      LabelLedgerEntry@1102401007 : Record 50011;
+      QtyIncompl@1102401004 : Decimal;
+      QtySuperior@1102401005 : Decimal;
+    BEGIN
+      //lote superior
+      LedgerEntryTrackingLotNo6.RESET;
+      LedgerEntryTrackingLotNo6.SETRANGE("Entry No. Pre-Inventory"    ,InventaryScan."Entry No");
+      LedgerEntryTrackingLotNo6.SETFILTER("Sent to Journal Inventary" ,'=%1',FALSE);
+      LedgerEntryTrackingLotNo6.SETFILTER("Qty Physical"              ,'<>%1',0);
+      IF LedgerEntryTrackingLotNo6.FINDSET THEN BEGIN
+        REPEAT
+          QtySuperior:=0;
+          IF LedgerEntryTrackingLotNo6."Calculated Quantity" < LedgerEntryTrackingLotNo6."Qty Physical" THEN BEGIN
+            QtySuperior :=((LedgerEntryTrackingLotNo6."Qty Physical"-LedgerEntryTrackingLotNo6."Calculated Quantity")*-1);
+            AssignLotJrnalInventaryPhys(ItemJournalLine,LedgerEntryTrackingLotNo6."Lot. No.",QtySuperior);
+            CtrlTracking_LotNo_Label(ItemJournalLine,LedgerEntryTrackingLotNo6);
+          END;
+        UNTIL LedgerEntryTrackingLotNo6.NEXT=0;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertLotNegJrnalInv@1102401062(InventaryScan@1102401001 : Record 50066;ItemJournalLine@1102401003 : Record 83);
+    VAR
+      LedgerEntryTrackingLotNo@1102401002 : Record 50065;
+      LedgerEntryTrackingLotNo2@1102401013 : Record 50065;
+      LedgerEntryTrackingLotNo6@1102401010 : Record 50065;
+      LabelLedgerEntry@1102401007 : Record 50011;
+      QtyIncompl@1102401004 : Decimal;
+      QtySuperior@1102401005 : Decimal;
+    BEGIN
+      //>>asigna Lotes no encontrados
+      LedgerEntryTrackingLotNo.RESET;
+      LedgerEntryTrackingLotNo.SETRANGE("Entry No. Pre-Inventory"   ,InventaryScan."Entry No");
+      LedgerEntryTrackingLotNo.SETFILTER("Sent to Journal Inventary",'=%1',FALSE);
+      LedgerEntryTrackingLotNo.SETFILTER("Qty Physical"             ,'=%1',0);
+      LedgerEntryTrackingLotNo.SETFILTER("Calculated Quantity"       ,'<>%1',0);
+      IF LedgerEntryTrackingLotNo.FINDSET THEN BEGIN
+        REPEAT
+         AssignLotJrnalInventaryPhys(ItemJournalLine,LedgerEntryTrackingLotNo."Lot. No.",LedgerEntryTrackingLotNo."Calculated Quantity");
+         CtrlTracking_LotNo_Label(ItemJournalLine,LedgerEntryTrackingLotNo);
+        UNTIL LedgerEntryTrackingLotNo.NEXT=0;
+      END;
